@@ -77,6 +77,9 @@ class vgg_perceptual_loss(nn.Module):
         patchloss (bool): Enables PatchLoss. Default: False.
         ipk (bool): Enables Image Patch Kernel and adds to the final loss. Default: False.
         patch_weight (float): Weight of PatchLoss. Default: 1.0
+        gradual_weight_schedule (dict): A schedule for gradually
+            increasing perceptual loss weight during training based on
+            iterations. Default: None.
 
     """
 
@@ -91,6 +94,7 @@ class vgg_perceptual_loss(nn.Module):
         patchloss: bool = False,
         ipk: bool = False,
         patch_weight: float = 1.0,
+        gradual_weight_schedule: dict | None = None,
         **kwargs,  # noqa: ARG002
     ) -> None:
         super().__init__()
@@ -98,6 +102,7 @@ class vgg_perceptual_loss(nn.Module):
         self.patch_weights = patch_weight
         self.patchloss = patchloss
         self.ipk = ipk
+        self.gradual_weight_schedule = gradual_weight_schedule
 
         if layer_weights is not None:
             self.layer_weights = layer_weights
@@ -146,6 +151,23 @@ class vgg_perceptual_loss(nn.Module):
             msg = f"{criterion} criterion not supported."
             raise NotImplementedError(msg)
 
+    def get_loss_weight(self, current_iter: int) -> float:
+        """Get the current loss weight based on the gradual weight schedule."""
+        if self.gradual_weight_schedule:
+            start_iter = self.gradual_weight_schedule.get("start_iter", 0)
+            end_iter = self.gradual_weight_schedule.get("end_iter", 0)
+            start_weight = self.gradual_weight_schedule.get("start_weight", self.loss_weight)
+            end_weight = self.gradual_weight_schedule.get("end_weight", self.loss_weight)
+
+            if current_iter < start_iter:
+                return start_weight
+            elif current_iter > end_iter:
+                return end_weight
+            else:
+                progress = (current_iter - start_iter) / (end_iter - start_iter)
+                return start_weight + progress * (end_weight - start_weight)
+        return self.loss_weight
+
     @torch.no_grad()
     @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")
     def patch(self, x: Tensor, gt: Tensor, is_ipk: bool = False) -> float:
@@ -182,13 +204,14 @@ class vgg_perceptual_loss(nn.Module):
 
         return loss
 
-    def forward(self, x: Tensor, gt: Tensor) -> float:
+    def forward(self, x: Tensor, gt: Tensor, current_iter: int = 0) -> float:
         """Forward function.
 
         Args:
         ----
             x (Tensor): Input tensor with shape (n, c, h, w).
             gt (Tensor): Ground-truth tensor with shape (n, c, h, w).
+            current_iter (int): Current training iteration. Default: 0.
 
         Returns:
         -------
@@ -220,4 +243,7 @@ class vgg_perceptual_loss(nn.Module):
             ipk = self.patch(x, gt, is_ipk=True)
             percep_loss += ipk
 
-        return percep_loss * self.loss_weight
+        # adjust loss weight based on gradual schedule
+        current_weight = self.get_loss_weight(current_iter)
+        return percep_loss * current_weight
+
